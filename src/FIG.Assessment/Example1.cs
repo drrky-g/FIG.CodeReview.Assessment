@@ -1,5 +1,7 @@
 ﻿using System.Collections.Concurrent;
+using System.Reflection;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace FIG.Assessment;
 
@@ -10,27 +12,45 @@ namespace FIG.Assessment;
 /// by using 5 background worker threads.
 /// Feel free to suggest changes to any part of this example.
 /// In addition to finding issues and/or ways of improving this method, what is a name for this sort of queueing pattern?
-///Provider Consumer pattern is what this looks like, but could also be one part of a saga pattern
+///Provider Consumer pattern is what this looks like, but could also be one part of a saga pattern that builds out a 'person' object from various sources
 /// </summary>
 public class Example1
 {
     private readonly IConfiguration _config;
-    public Example1(IConfiguration config) => _config = config;
+    private static HttpClient _client;
+    private readonly ILogger<Example1> _logger;
+    public Example1(IConfiguration config, IHttpClientFactory httpClientFactory, ILogger<Example1> logger)
+    {
+        _config = config;
+        _logger = logger;
+        string baseUrl = _config.GetValue<string>("PersonClient:BaseUrl");
+        ArgumentNullException.ThrowIfNull(baseUrl);
+        httpClientFactory.CreateClient().BaseAddress = new Uri(baseUrl);
+    } 
     public async Task<Dictionary<int, int>> GetPeopleInfo()
     {
         int consumerCount = _config.GetValue<int>("ConsumerCount", 5);
         
         // initialize empty queue, and empty result set
         var personIdQueue = new ConcurrentQueue<int>();
-        var results = new Dictionary<int, int>();
-        
+        var results = new ConcurrentDictionary<int, int>();
+
+        _logger.LogInformation($"starting {nameof(GetPeopleInfo)} provider task..");
         Task provider = Task.Run(() => CollectPersonIds(personIdQueue));
         
+        
+        _logger.LogInformation($"starting {consumerCount} {nameof(GatherNumericInfo)} task");
         List<Task> consumers = Enumerable.Range(0,consumerCount)
-            .Select(_ => Task.Run(() => GatherNumericInfo(personIdQueue, results, "age"))).ToList();
+            .Select(i =>
+            {
+                _logger.LogInformation($"starting {nameof(GatherNumericInfo)} {i+1}");
+                return Task.Run(() => GatherNumericInfo(personIdQueue, results, "age"));
+            }).ToList();
         
         await Task.WhenAll(consumers);
-        return results;
+        _logger.LogInformation($"consumer tasks complete with {results.Count} unique records");
+        
+        return new(results);
     }
 
     private Task CollectPersonIds(ConcurrentQueue<int> personIdQueue)
@@ -44,18 +64,19 @@ public class Example1
         return Task.CompletedTask;
     }
 
-    private async Task GatherNumericInfo(ConcurrentQueue<int> personIdQueue, Dictionary<int,int> results, string fieldName)
+    private async Task GatherNumericInfo(ConcurrentQueue<int> personIdQueue, ConcurrentDictionary<int,int> results, string fieldName)
     {
         // pull IDs off the queue until it is empty
         while (personIdQueue.TryDequeue(out var id))
         {
-            var client = new HttpClient();
-            var request = new HttpRequestMessage(HttpMethod.Get, $"https://some.example.api/people/{id}/{fieldName}");
-            var response = await client.SendAsync(request);
-            var age = int.Parse(response.Content.ReadAsStringAsync().Result);
-            if (!results.TryAdd(id, age))
+            using (var response = await _client.GetAsync($"people/{id}/{fieldName}"))
             {
-                //error handling?
+                string json = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation($"{fieldName} found for personId {id} : {json}");
+                if (!results.TryAdd(id, int.Parse(json)))
+                {
+                    _logger.LogError($"PersonId ({id}) already exists in dictionary.");
+                }
             }
         }
     }
