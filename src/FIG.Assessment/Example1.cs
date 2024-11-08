@@ -1,4 +1,7 @@
-﻿namespace FIG.Assessment;
+﻿using System.Collections.Concurrent;
+using Microsoft.Extensions.Configuration;
+
+namespace FIG.Assessment;
 
 /// <summary>
 /// In this example, the goal of this GetPeopleInfo method is to fetch a list of Person IDs from our database (not implemented / not part of this example),
@@ -7,37 +10,30 @@
 /// by using 5 background worker threads.
 /// Feel free to suggest changes to any part of this example.
 /// In addition to finding issues and/or ways of improving this method, what is a name for this sort of queueing pattern?
+///Provider Consumer pattern is what this looks like, but could also be one part of a saga pattern
 /// </summary>
 public class Example1
 {
-    public Dictionary<int, int> GetPeopleInfo()
+    private readonly IConfiguration _config;
+    public Example1(IConfiguration config) => _config = config;
+    public async Task<Dictionary<int, int>> GetPeopleInfo()
     {
+        int consumerCount = _config.GetValue<int>("ConsumerCount", 5);
+        
         // initialize empty queue, and empty result set
-        var personIdQueue = new Queue<int>();
+        var personIdQueue = new ConcurrentQueue<int>();
         var results = new Dictionary<int, int>();
-
-        // start thread which will populate the queue
-        var collectThread = new Thread(() => CollectPersonIds(personIdQueue));
-        collectThread.Start();
-
-        // start 5 worker threads to read through the queue and fetch info on each item, adding to the result set
-        var gatherThreads = new List<Thread>();
-        for (var i = 0; i < 5; i++)
-        {
-            var gatherThread = new Thread(() => GatherInfo(personIdQueue, results));
-            gatherThread.Start();
-            gatherThreads.Add(gatherThread);
-        }
-
-        // wait for all threads to finish
-        collectThread.Join();
-        foreach (var gatherThread in gatherThreads)
-            gatherThread.Join();
-
+        
+        Task provider = Task.Run(() => CollectPersonIds(personIdQueue));
+        
+        List<Task> consumers = Enumerable.Range(0,consumerCount)
+            .Select(_ => Task.Run(() => GatherNumericInfo(personIdQueue, results, "age"))).ToList();
+        
+        await Task.WhenAll(consumers);
         return results;
     }
 
-    private void CollectPersonIds(Queue<int> personIdQueue)
+    private Task CollectPersonIds(ConcurrentQueue<int> personIdQueue)
     {
         // dummy implementation, would be pulling from a database
         for (var i = 1; i < 100; i++)
@@ -45,18 +41,22 @@ public class Example1
             if (i % 10 == 0) Thread.Sleep(TimeSpan.FromMilliseconds(50)); // artificial delay every now and then
             personIdQueue.Enqueue(i);
         }
+        return Task.CompletedTask;
     }
 
-    private void GatherInfo(Queue<int> personIdQueue, Dictionary<int, int> results)
+    private async Task GatherNumericInfo(ConcurrentQueue<int> personIdQueue, Dictionary<int,int> results, string fieldName)
     {
         // pull IDs off the queue until it is empty
         while (personIdQueue.TryDequeue(out var id))
         {
             var client = new HttpClient();
-            var request = new HttpRequestMessage(HttpMethod.Get, $"https://some.example.api/people/{id}/age");
-            var response = client.SendAsync(request).Result;
+            var request = new HttpRequestMessage(HttpMethod.Get, $"https://some.example.api/people/{id}/{fieldName}");
+            var response = await client.SendAsync(request);
             var age = int.Parse(response.Content.ReadAsStringAsync().Result);
-            results[id] = age;
+            if (!results.TryAdd(id, age))
+            {
+                //error handling?
+            }
         }
     }
 }

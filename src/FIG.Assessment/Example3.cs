@@ -1,4 +1,8 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using FIG.Assessment.Interfaces;
+using FIG.Assessment.Models.Database;
+using FIG.Assessment.Repositories;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -16,11 +20,11 @@ public class Example3
         Host.CreateDefaultBuilder(args)
             .ConfigureServices(services =>
             {
-                services.AddDbContext<MyContext>(options =>
+                services.AddDbContext<UserContext>(options =>
                 {
                     options.UseSqlServer("dummy-connection-string");
                 });
-                services.AddSingleton<ReportEngine>();
+                services.AddSingleton<IUserReportService, UserRepository>();
                 services.AddHostedService<DailyReportService>();
             })
             .Build()
@@ -30,9 +34,9 @@ public class Example3
 
 public class DailyReportService : BackgroundService
 {
-    private readonly ReportEngine _reportEngine;
-
-    public DailyReportService(ReportEngine reportEngine) => _reportEngine = reportEngine;
+    private readonly IUserReportService _userReportService;
+    public DailyReportService(IUserReportService userReportService, IConfiguration config) => 
+        _userReportService = userReportService;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -41,66 +45,35 @@ public class DailyReportService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var newUsersTask = this._reportEngine.GetNewUsersAsync(startingFrom);
-            var deactivatedUsersTask = this._reportEngine.GetDeactivatedUsersAsync(startingFrom);
-            await Task.WhenAll(newUsersTask, deactivatedUsersTask); // run both queries in parallel to save time
+            // run both queries in parallel to save time
+            var newUsersTask = this._userReportService.GetNewUsersAsync(startingFrom);
+            var deactivatedUsersTask = this._userReportService.GetDeactivatedUsersAsync(startingFrom);
+            Task.WhenAll(newUsersTask, deactivatedUsersTask).ContinueWith(async (work) =>
+            {
+                if (work.IsCompletedSuccessfully)
+                {
+                    await SendUserReportAsync(work.Result[0], work.Result[1]);
+                }
+                else
+                {
+                    //logging/alerts with exception from work (would need to inject interfaces that implimenting this
+                    var e = work.Exception;
+                }
+            }, stoppingToken)
+                .Unwrap();
 
             // send report to execs
             await this.SendUserReportAsync(newUsersTask.Result, deactivatedUsersTask.Result);
 
             // save the current time, wait 24hr, and run the report again - using the new cutoff date
             startingFrom = DateTime.Now;
-            await Task.Delay(TimeSpan.FromHours(24));
+            await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
         }
     }
 
-    private Task SendUserReportAsync(IEnumerable<User> newUsers, IEnumerable<User> deactivatedUsers)
+    private Task SendUserReportAsync(IEnumerable<UserDb> newUsers, IEnumerable<UserDb> deactivatedUsers)
     {
         // not part of this example
         return Task.CompletedTask;
     }
 }
-
-/// <summary>
-/// A dummy report engine that runs queries and returns results.
-/// The queries here a simple but imagine they might be complex SQL queries that could take a long time to complete.
-/// </summary>
-public class ReportEngine
-{
-    private readonly MyContext _db;
-
-    public ReportEngine(MyContext db) => _db = db;
-
-    public async Task<IEnumerable<User>> GetNewUsersAsync(DateTime startingFrom)
-    {
-        var newUsers = (await this._db.Users.ToListAsync())
-            .Where(u => u.CreatedAt > startingFrom);
-        return newUsers;
-    }
-
-    public async Task<IEnumerable<User>> GetDeactivatedUsersAsync(DateTime startingFrom)
-    {
-        var deactivatedUsers = (await this._db.Users.ToListAsync())
-            .Where(u => u.DeactivatedAt > startingFrom);
-        return deactivatedUsers;
-    }
-}
-
-#region Database Entities
-// a dummy EFCore dbcontext - not concerned with actually setting up connection strings or configuring the context in this example
-public class MyContext : DbContext
-{
-    public DbSet<User> Users { get; set; }
-}
-
-public class User
-{
-    public int UserId { get; set; }
-
-    public string UserName { get; set; }
-
-    public DateTime CreatedAt { get; set; }
-
-    public DateTime? DeactivatedAt { get; set; }
-}
-#endregion
