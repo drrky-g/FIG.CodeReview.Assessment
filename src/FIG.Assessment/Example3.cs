@@ -42,8 +42,8 @@ public interface IAlertService
     void SendAlert(string toAddress, string subject, Exception exception);
 }
 
-//Instead of creating a full blown hosted bg service for this I would probably just write it as a task and schedule it on a machine
-//or add it to a large task scheduler/manager that may be part of domain (esp in context of reporting, pushing it to db layer wouldnt be bad idea)
+//Instead of creating a hosted bg service for this I would probably just write it as a task and schedule it on a machine (CronJob or TaskScheduler)
+//(in context of reporting, pushing it to db layer wouldn't be bad idea)
 public class DailyReportService : BackgroundService
 {
     private readonly IUserReportService _userReportService;

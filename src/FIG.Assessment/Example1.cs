@@ -23,9 +23,11 @@ public class Example1
     {
         _config = config;
         _logger = logger;
+        _client = httpClientFactory.CreateClient();
+        ArgumentNullException.ThrowIfNull(_client);
+        
         string baseUrl = _config.GetValue<string>("PersonClient:BaseUrl");
         ArgumentNullException.ThrowIfNull(baseUrl);
-        _client = httpClientFactory.CreateClient();
         _client.BaseAddress = new Uri(baseUrl);
     } 
     public async Task<Dictionary<int, int>> GetPeopleInfo()
