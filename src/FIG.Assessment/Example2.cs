@@ -1,63 +1,51 @@
 ﻿using System.Security.Claims;
-using System.Security.Cryptography;
-using System.Text;
+using FIG.Assessment.Interfaces;
+using FIG.Assessment.Models.Requests;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Configuration;
+using Microsoft.EntityFrameworkCore;
 
 namespace FIG.Assessment;
 
 public class Example2 : Controller
 {
-    public IConfiguration _config;
+    private readonly ILoginService _loginService;
+    public Example2(ILoginService loginService)
+        => _loginService = loginService;
 
-    public Example2(IConfiguration config)
-        => this._config = config;
-
+    //I'm aware of an exploit penetration testers use where they will check the response time of requests like this
+    //A quick response time indicates that the user they tried to log in as didn't exist in database
+    //A longer one indicates that they got past the user check and got to the hash check
+    //Using controls like rate limiting, some kind of token verification from the post, and login attempt limits
+    //helps protect from brute-forcing an endpoint like this
     [HttpPost("login")]
-    public async Task<IActionResult> LoginAsync([FromForm] LoginPostModel model)
+    public async Task<IActionResult> LoginAsync([FromForm] LoginRequest model)
     {
-        using var conn = new SqlConnection(this._config.GetConnectionString("SQL"));
-        await conn.OpenAsync();
-
-        var sql = $"SELECT u.UserID, u.PasswordHash FROM User u WHERE u.UserName='{model.UserName}';";
-        using var cmd = new SqlCommand(sql, conn);
-        using var reader = await cmd.ExecuteReaderAsync();
-
+        if(!ModelState.IsValid)
+            return BadRequest(ModelState);
+        
+        var user = await _loginService.GetUserByUsernameAsync(model.UserName);
+        
         // first check user exists by the given username
-        if (!reader.Read())
-        {
-            return this.Redirect("/Error?msg=invalid_username");
-        }
-
+        if (user == null)
+            return Redirect("/Error?msg=invalid_username");
+        
         // then check password is correct
-        var inputPasswordHash = MD5.HashData(Encoding.UTF8.GetBytes(model.Password));
-        var databasePasswordHash = (byte[])reader["PasswordHash"];
-        if (!databasePasswordHash.SequenceEqual(inputPasswordHash))
-        {
-            return this.Redirect("/Error?msg=invalid_password");
-        }
+        if(!_loginService.IsPasswordValid(model.Password, user))
+            return Redirect("/Error?msg=invalid_password");
+
 
         // if we get this far, we have a real user. sign them in
-        var userId = (int)reader["UserID"];
         var claims = new List<Claim>
         {
-            new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+            new Claim(ClaimTypes.NameIdentifier, $"{user.UserId}")
         };
         var identity = new ClaimsIdentity(claims);
         var principal = new ClaimsPrincipal(identity);
-        this.HttpContext.SignInAsync(principal);
+        await HttpContext.SignInAsync(principal);
 
         return this.Redirect(model.ReturnUrl);
     }
 }
 
-public class LoginPostModel
-{
-    public string UserName { get; set; }
 
-    public string Password { get; set; }
-
-    public string ReturnUrl { get; set; }
-}

@@ -1,6 +1,11 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using FIG.Assessment.Interfaces;
+using FIG.Assessment.Models.Database;
+using FIG.Assessment.Repositories;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace FIG.Assessment;
 
@@ -14,13 +19,17 @@ public class Example3
     public static void Main(string[] args)
     {
         Host.CreateDefaultBuilder(args)
+            .ConfigureLogging((context, logging) =>
+            {
+                //add logging via abstraction/package (like SeriLog, NLog, etc.)
+            })
             .ConfigureServices(services =>
             {
-                services.AddDbContext<MyContext>(options =>
+                services.AddDbContext<UserContext>(options =>
                 {
                     options.UseSqlServer("dummy-connection-string");
                 });
-                services.AddSingleton<ReportEngine>();
+                services.AddSingleton<IUserReportService, UserRepository>();
                 services.AddHostedService<DailyReportService>();
             })
             .Build()
@@ -28,79 +37,71 @@ public class Example3
     }
 }
 
+public interface IAlertService
+{
+    void SendAlert(string toAddress, string subject, Exception exception);
+}
+
+//Instead of creating a hosted bg service for this I would probably just write it as a task and schedule it on a machine (CronJob or TaskScheduler)
+//(in context of reporting, pushing it to db layer wouldn't be bad idea)
 public class DailyReportService : BackgroundService
 {
-    private readonly ReportEngine _reportEngine;
-
-    public DailyReportService(ReportEngine reportEngine) => _reportEngine = reportEngine;
+    private readonly IUserReportService _userReportService;
+    private readonly ILogger<DailyReportService> _logger;
+    private readonly IAlertService _alertService;
+    private readonly string _toAddress;
+    public DailyReportService(IUserReportService userReportService, ILogger<DailyReportService> logger, IAlertService alertService, IConfiguration config)
+    {
+        _userReportService = userReportService;
+        _logger = logger;
+        _alertService = alertService;
+        _toAddress = config.GetValue<string>("ToAddress", "");
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // when the service starts up, start by looking back at the last 24 hours
-        var startingFrom = DateTime.Now.AddDays(-1);
+        var startingFrom = DateTime.UtcNow.AddDays(-1);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var newUsersTask = this._reportEngine.GetNewUsersAsync(startingFrom);
-            var deactivatedUsersTask = this._reportEngine.GetDeactivatedUsersAsync(startingFrom);
-            await Task.WhenAll(newUsersTask, deactivatedUsersTask); // run both queries in parallel to save time
+            
+            _logger.LogInformation("Starting daily report task");
+            // run both queries in parallel to save time
+            var newUsersTask = this._userReportService.GetNewUsersAsync(startingFrom);
+            var deactivatedUsersTask = this._userReportService.GetDeactivatedUsersAsync(startingFrom);
+            _logger.LogInformation($"initializing ");
+            Task.WhenAll(newUsersTask, deactivatedUsersTask).ContinueWith(async (work) =>
+            {
+                if (work.IsCompletedSuccessfully)
+                {
+                    _logger.LogInformation("queries completed.");
+                    _logger.LogInformation($"new users : {work.Result[0].Count()}, deactivated users: {work.Result[1].Count()}");
+                    await SendUserReportAsync(work.Result[0], work.Result[1]);
+                    _logger.LogInformation("user report sent.");
+                }
+                else
+                {
+                    _logger.LogInformation($"error running queries for report service. Exception: {work.Exception?.Message}");
+                    if(!string.IsNullOrEmpty(_toAddress))
+                        _alertService.SendAlert(_toAddress, $"{nameof(DailyReportService)} failure", work.Exception);
+                        
+                }
+            }, stoppingToken)
+                .Unwrap();
 
             // send report to execs
             await this.SendUserReportAsync(newUsersTask.Result, deactivatedUsersTask.Result);
 
             // save the current time, wait 24hr, and run the report again - using the new cutoff date
-            startingFrom = DateTime.Now;
-            await Task.Delay(TimeSpan.FromHours(24));
+            startingFrom = DateTime.UtcNow;
+            await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
         }
     }
 
-    private Task SendUserReportAsync(IEnumerable<User> newUsers, IEnumerable<User> deactivatedUsers)
+    private Task SendUserReportAsync(IEnumerable<UserDb> newUsers, IEnumerable<UserDb> deactivatedUsers)
     {
         // not part of this example
         return Task.CompletedTask;
     }
 }
-
-/// <summary>
-/// A dummy report engine that runs queries and returns results.
-/// The queries here a simple but imagine they might be complex SQL queries that could take a long time to complete.
-/// </summary>
-public class ReportEngine
-{
-    private readonly MyContext _db;
-
-    public ReportEngine(MyContext db) => _db = db;
-
-    public async Task<IEnumerable<User>> GetNewUsersAsync(DateTime startingFrom)
-    {
-        var newUsers = (await this._db.Users.ToListAsync())
-            .Where(u => u.CreatedAt > startingFrom);
-        return newUsers;
-    }
-
-    public async Task<IEnumerable<User>> GetDeactivatedUsersAsync(DateTime startingFrom)
-    {
-        var deactivatedUsers = (await this._db.Users.ToListAsync())
-            .Where(u => u.DeactivatedAt > startingFrom);
-        return deactivatedUsers;
-    }
-}
-
-#region Database Entities
-// a dummy EFCore dbcontext - not concerned with actually setting up connection strings or configuring the context in this example
-public class MyContext : DbContext
-{
-    public DbSet<User> Users { get; set; }
-}
-
-public class User
-{
-    public int UserId { get; set; }
-
-    public string UserName { get; set; }
-
-    public DateTime CreatedAt { get; set; }
-
-    public DateTime? DeactivatedAt { get; set; }
-}
-#endregion
