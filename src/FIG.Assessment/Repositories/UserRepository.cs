@@ -25,6 +25,6 @@ public class UserRepository : ILoginService, IUserReportService
             .ToListAsync();
 
     public async Task<IEnumerable<UserDb>> GetDeactivatedUsersAsync(DateTime startingFrom) =>
-        await _db.Users.Where(user => user.DeactivatedAt > startingFrom)
+        await _db.Users.Where(user => user.DeactivatedAt != null && user.DeactivatedAt > startingFrom)
             .ToListAsync();
 }

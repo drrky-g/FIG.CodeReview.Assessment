@@ -13,6 +13,11 @@ public class Example2 : Controller
     public Example2(ILoginService loginService)
         => _loginService = loginService;
 
+    //I'm aware of an exploit penetration testers use where they will check the response time of requests like this
+    //A quick response time indicates that the user they tried to log in as didn't exist in database
+    //A longer one indicates that they got past the user check and got to the hash check
+    //Using controls like rate limiting, some kind of token verification from the post, and login attempt limits
+    //helps protect from brute-forcing an endpoint like this
     [HttpPost("login")]
     public async Task<IActionResult> LoginAsync([FromForm] LoginRequest model)
     {
